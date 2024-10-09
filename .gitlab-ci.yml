@@ -1,0 +1,75 @@
+image: php:8.3-alpine
+
+stages:
+  - build
+  - test
+  - deploy
+
+variables: 
+  USER: "ubuntu"
+  App_DIR: "/var/www/laravel-cicd"
+  #PROD_HOST: $PROD_HOST
+  #SSH_PRIVATE_KEY: $SSH_PRIVATE_KEY
+
+before_script:
+  - apk add --no-cache openssh-client
+  - mkdir -p ~/.ssh
+  - echo "$SSH_PRIVATE_KEY" | tr -d '\r' > ~/.ssh/id-ed25519
+  - chmod 600 ~/.ssh/id-ed25519
+  - '[[-f /.dockerenv]] && echo -e "Host *\n\tStrictHostKeyChecking no\n\n" > ~/.ssh/config'
+
+build-prod:
+  stage: build
+  when: manual
+  script:
+    - echo "Building the application...."
+    - composer install --optimize-autoloader
+    - npm install
+    - npm run build
+  artifacts:
+    paths:
+      - public
+      - vendor
+      - node_modules
+  only:
+    - master
+
+test-prod:
+  stage: test
+  when: on_success
+  needs:
+    - job: build-prod
+      artifacts: true
+  script: 
+    - echo "Running tests...."
+    - cp .env.example .env
+    - php artisan key:generate
+    - sed -i 's/DB_CONNECTION=mysql/DB_CONNECTION=sqlite/g' .env
+    - sed -i 's/DB_DATABASE=laravel/DB_DATABASE=:memory:/g' .env
+    - php artisan migrate --force
+    - php artisan db:seed
+    - composer install
+    - php artisan test
+  only:
+    - master
+
+deploy-prod:
+  stage: deploy
+  when: manual
+  needs:
+    - job: build-prod
+      artifacts: true
+    - job: test-prod
+  script:
+    - echo "Deploying to production...."
+    - ssh $USER@PROD_HOST "cd $APP_DIR && php artisan down"
+    - ssh $USER@PROD_HOST "cd $APP_DIR && git pull origin master"
+    - ssh $USER@PROD_HOST "cd $APP_DIR && composer install --no-dev --optimize-autoloader"
+    - ssh $USER@PROD_HOST "cd $APP_DIR && php artisan optimize:clear" 
+    - ssh $USER@PROD_HOST "cd $APP_DIR && php artisan migrate --force"
+    - ssh $USER@PROD_HOST "cd $APP_DIR && php artisan up"
+    - ssh $USER@PROD_HOST "cd $APP_DIR && php artisan optimize"
+    - ssh $USER@PROD_HOST "cd $APP_DIR && php artisan event:cache"
+
+  only:
+    - master
